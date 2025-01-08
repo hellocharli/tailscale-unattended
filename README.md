@@ -57,7 +57,7 @@ Displays help information. Equivalent to `-Command help`.
 Feel free to open issues or submit pull requests if you encounter any problems or have suggestions for improvements.
 
 ## License
-This script is provided under the MIT License. You are free to use, modify, and distribute it.
+This script is provided under the MIT License. You are free to use, modify, and distribute it. Attribution is appreciated.
 
 ## Disclaimer
 This script is provided as-is with no warranty. Use at your own risk. Always review the script’s contents to ensure it meets your organization’s security and deployment requirements.
