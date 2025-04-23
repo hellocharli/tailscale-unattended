@@ -3,30 +3,21 @@ param (
     [Parameter(Position = 0)]
     [ValidateSet('connect', 'disconnect', 'help')]
     [string]$Command,
-
-    [Parameter()]
-    [Alias('auth-key')]
-    [string]$AuthKey,
-
-    [Parameter()]
-    [Alias('advertise-tags')]
-    [string[]]$AdvertiseTags,
-    
-    [Parameter()]
-    [Alias('h')]
-    [switch]$Help
+    [Alias('auth-key')][string]$AuthKey,
+    [Alias('advertise-tags')][string[]]$AdvertiseTags,
+    [Alias('h')][switch]$Help
 )
 
 $ErrorActionPreference = 'Stop'
 
 # Configuration
 $script:Config = @{
-    AuthKey         = ''  # Optionally set a default auth key
-    DefaultTags     = @('')  # Optionally set default tags
-    TempDir        = $env:TEMP
-    InstallDir     = Join-Path $env:ProgramFiles 'Tailscale'
-    BaseUrl        = 'https://pkgs.tailscale.com'
-    MsiArgs        = @(
+    AuthKey     = ''  # Optionally set a default auth key
+    DefaultTags = @('')  # Optionally set default tags
+    TempDir     = $env:TEMP
+    InstallDir  = Join-Path $env:ProgramFiles 'Tailscale'
+    BaseUrl     = 'https://pkgs.tailscale.com'
+    MsiArgs     = @(
         'TS_ADMINCONSOLE=hide'
         'TS_ADVERTISEEXITNODE=never'
         'TS_ALLOWINCOMINGCONNECTIONS=never'
@@ -54,36 +45,15 @@ function Assert-AdminPrivileges {
 }
 
 function Format-Tags {
-    param (
-        [string[]]$Tags
-    )
-    
-    if (-not $Tags) { return $null }
-    
-    $formattedTags = $Tags | Where-Object { $_ } | ForEach-Object {
-        if ($_ -notlike "tag:*") {
-            "tag:$_"
-        } else {
-            $_
-        }
-    }
-    
-    return $formattedTags -join ','
+    param([string[]]$Tags)
+    ($Tags | Where-Object { $_ } | ForEach-Object {
+        if ($_ -notlike 'tag:*') { "tag:$_" } else { $_ }
+    }) -join ','
 }
 
 function Get-TailscaleInstaller {
     [CmdletBinding()]
     param()
-    
-    # Check for an existing installer in the installation directory
-    $existingInstaller = Get-ChildItem -Path $script:Config.InstallDir -Filter "tailscale-setup-*.msi" -ErrorAction SilentlyContinue |
-        Sort-Object LastWriteTime -Descending |
-        Select-Object -First 1
-
-    if ($existingInstaller) {
-        Write-Verbose "Found existing installer: $($existingInstaller.FullName)"
-        return $existingInstaller.FullName
-    }
 
     Write-Host "Downloading latest Tailscale installer..."
     $latestUrl = "$($script:Config.BaseUrl)/stable/tailscale-setup-latest-amd64.msi"
@@ -113,9 +83,7 @@ function Get-TailscaleInstaller {
         
         return $installerPath
     }
-    catch {
-        throw "Failed to download Tailscale installer: $_"
-    }
+    catch { throw "Failed to download Tailscale installer: $_" }
     finally {
         if ($response) { $response.Dispose() }
     }
@@ -124,98 +92,74 @@ function Get-TailscaleInstaller {
 function Install-Tailscale {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$InstallerPath,
-        [Parameter(Mandatory = $true)]
-        [string]$AuthKey,
+        [Parameter(Mandatory = $true)][string]$InstallerPath,
+        [Parameter(Mandatory = $true)][string]$AuthKey,
         [string[]]$Tags
     )
 
-    # Build installation arguments
+    Write-Host "Installing Tailscale..."
     $msiArgs = @("/i", "`"$InstallerPath`"", "/quiet") + $script:Config.MsiArgs
+    $result = Start-Process msiexec.exe -ArgumentList $msiArgs -Wait -PassThru
+    if ($result.ExitCode -ne 0) { throw "MSI install failed: $($result.ExitCode)" }
 
-    # Build Tailscale CLI arguments
-    $cliArgs = @('up', '--unattended')
-    $cliArgs += "--auth-key=$AuthKey"
-    
+    Write-Host "Bringing Tailscale up..."
+    $tailscaleExe = Join-Path $script:Config.InstallDir 'tailscale.exe'
+    $upArgs = @('up', '--unattended', "--auth-key=$AuthKey", "--reset")
     if ($Tags) {
         $formattedTags = Format-Tags -Tags $Tags
         if ($formattedTags) {
-            $cliArgs += "--advertise-tags=$formattedTags"
+            $upArgs += "--advertise-tags=$formattedTags"
         }
     }
+    $result = Start-Process $tailscaleExe -ArgumentList $upArgs -Wait -NoNewWindow -PassThru
+    if ($result.ExitCode -ne 0) { throw "tailscale up failed: $($result.ExitCode)" }
 
-    Write-Host "Installing Tailscale..."
-    $result = Start-Process msiexec.exe -ArgumentList $msiArgs -Wait -PassThru -NoNewWindow
-    
-    if ($result.ExitCode -ne 0) {
-        throw "Installation failed with exit code: $($result.ExitCode)"
-    }
-
-    $null = New-Item -ItemType Directory -Path $script:Config.InstallDir -Force -ErrorAction SilentlyContinue
-    Move-Item -Path $InstallerPath -Destination $script:Config.InstallDir -Force
-
-    # Move the MSI into the installation directory for future reference
-    Write-Host "Authenticating with Tailscale..."
-    $tailscaleExe = Join-Path $script:Config.InstallDir 'tailscale.exe'
-    Write-Verbose "Running Tailscale with arguments: $($cliArgs -join ' ')"
-    $result = Start-Process $tailscaleExe -ArgumentList $cliArgs -Wait -PassThru -NoNewWindow
-    
-    if ($result.ExitCode -ne 0) {
-        throw "Authentication failed with exit code: $($result.ExitCode)"
-    }
-
+    Write-Verbose "Cleaning up MSI installer"
+    Remove-Item $InstallerPath -Force -ErrorAction SilentlyContinue
     Write-Host "Successfully installed and authenticated"
 }
 
 function Uninstall-Tailscale {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$InstallerPath
-    )
+    $tailscaleExe = Join-Path $script:Config.InstallDir 'tailscale.exe'
 
-    Write-Host "Stopping Tailscale processes..."
-    
-    Get-Process -Name "tailscale-ipn" -ErrorAction SilentlyContinue | ForEach-Object {
-        Write-Verbose "Stopping tailscale-ipn process (PID: $($_.Id))"
-        $_ | Stop-Process -Force
+    if (Test-Path $tailscaleExe) {
+        Write-Host "Bringing Tailscale down'..."
+        try { & $tailscaleExe down | Out-Null }
+        catch { Write-Warning "Failed to run 'tailscale down': $_" }
     }
-
-    Get-Process -Name "tailscaled" -ErrorAction SilentlyContinue | ForEach-Object {
-        Write-Verbose "Stopping tailscaled process (PID: $($_.Id))"
-        $_ | Stop-Process -Force
+    else {
+        Write-Warning "tailscale.exe not found, skipping 'down' step."
     }
-
-    if (Get-Service -Name "Tailscale" -ErrorAction SilentlyContinue) {
-        Write-Verbose "Stopping Tailscale service"
-        Stop-Service -Name "Tailscale" -Force -ErrorAction SilentlyContinue
-    }
-
-    Start-Sleep -Seconds 2
 
     Write-Host "Uninstalling Tailscale..."
-    $result = Start-Process msiexec.exe -ArgumentList "/x", "`"$InstallerPath`"", "/quiet" -Wait -PassThru -NoNewWindow
-    
+    $uninstallString = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*" |
+    Where-Object { $_.DisplayName -match "tailscale" } |
+    Select-Object -ExpandProperty UninstallString
+    if ($uninstallString -match '\{[A-F0-9\-]+\}') {
+        $guid = $matches[0]
+        $msiArgs = @("/X", "`"$guid`"", "/quiet")
+    } else {
+        throw "Failed to get uninstallation string. Exiting..."
+    }
+
+    $result = Start-Process msiexec.exe -ArgumentList $msiArgs -Wait -PassThru -NoNewWindow
     if ($result.ExitCode -ne 0) {
         throw "Uninstallation failed with exit code: $($result.ExitCode)"
     }
 
+    Write-Host "Cleaning up leftover files..."
     $cleanupPaths = @(
-        $script:Config.InstallDir
-        (Join-Path $env:ProgramData 'Tailscale')
+        $script:Config.InstallDir,
+        (Join-Path $env:ProgramData 'Tailscale'),
         (Join-Path $env:LOCALAPPDATA 'Tailscale')
     )
-
     foreach ($path in $cleanupPaths) {
         if (Test-Path $path) {
-            Remove-Item $path -Recurse -Force
+            Remove-Item $path -Recurse -Force -ErrorAction SilentlyContinue
             Write-Host "Cleaned up $path"
         }
     }
-
-    Write-Host "Successfully uninstalled"
-}
+} 
 
 function Show-Help {
     Write-Host @"
@@ -276,8 +220,7 @@ try {
             Install-Tailscale -InstallerPath $installerPath -AuthKey $useAuthKey -Tags $useTags
         }
         'disconnect' {
-            $installerPath = Get-TailscaleInstaller
-            Uninstall-Tailscale -InstallerPath $installerPath
+            Uninstall-Tailscale
         }
         default {
             if ($Command) {
