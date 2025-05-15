@@ -102,6 +102,23 @@ function Install-Tailscale {
     $result = Start-Process msiexec.exe -ArgumentList $msiArgs -Wait -PassThru
     if ($result.ExitCode -ne 0) { throw "MSI install failed: $($result.ExitCode)" }
 
+    Write-Host "Waiting for Tailscale service to start..."
+    $serviceName = "Tailscale"
+    Start-Service -Name $serviceName -ErrorAction SilentlyContinue
+
+    $maxWait = 15
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while (
+        ((Get-Service -Name $serviceName).Status -ne 'Running') -and
+        ($sw.Elapsed.TotalSeconds -lt $maxWait)
+    ) {
+        Start-Sleep -Seconds 1
+    }
+    if ((Get-Service -Name $serviceName).Status -ne 'Running') {
+        throw "Tailscale service failed to start!" 
+    }
+    Write-Host "Tailscale service running."
+
     Write-Host "Bringing Tailscale up..."
     $tailscaleExe = Join-Path $script:Config.InstallDir 'tailscale.exe'
     $upArgs = @('up', '--unattended', "--auth-key=$AuthKey", "--reset")
