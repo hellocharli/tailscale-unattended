@@ -102,24 +102,6 @@ function Install-Tailscale {
     $result = Start-Process msiexec.exe -ArgumentList $msiArgs -Wait -PassThru
     if ($result.ExitCode -ne 0) { throw "MSI install failed: $($result.ExitCode)" }
 
-    Write-Host "Waiting for Tailscale service to start..."
-    $serviceName = "Tailscale"
-    Start-Service -Name $serviceName -ErrorAction SilentlyContinue
-
-    $maxWait = 15
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    while (
-        ((Get-Service -Name $serviceName).Status -ne 'Running') -and
-        ($sw.Elapsed.TotalSeconds -lt $maxWait)
-    ) {
-        Start-Sleep -Seconds 1
-    }
-    if ((Get-Service -Name $serviceName).Status -ne 'Running') {
-        throw "Tailscale service failed to start!" 
-    }
-    Write-Host "Tailscale service running."
-
-    Write-Host "Bringing Tailscale up..."
     $tailscaleExe = Join-Path $script:Config.InstallDir 'tailscale.exe'
     $upArgs = @('up', '--unattended', "--auth-key=$AuthKey", "--reset")
     if ($Tags) {
@@ -128,20 +110,48 @@ function Install-Tailscale {
             $upArgs += "--advertise-tags=$formattedTags"
         }
     }
-    $result = Start-Process $tailscaleExe -ArgumentList $upArgs -Wait -NoNewWindow -PassThru
-    if ($result.ExitCode -ne 0) { throw "tailscale up failed: $($result.ExitCode)" }
+    $maxAttempts   = 5
+    $attempt       = 1
+    $success       = $false
 
-    Write-Verbose "Cleaning up MSI installer"
-    Remove-Item $InstallerPath -Force -ErrorAction SilentlyContinue
-    Write-Host "Successfully installed and authenticated"
+    Write-Host "Bringing Tailscale up..."
+    while (-not $success -and $attempt -le $maxAttempts) {
+        try {
+            $out = & $tailscaleExe @upArgs 2>&1
+
+            if ($LASTEXITCODE -ne 0) {
+                throw "tailscale up failed (exit code $LASTEXITCODE)`n$($out -join "`n")"
+            }
+
+            Write-Host "Successfully installed and authenticated!"
+            $success = $true
+        }
+        catch {
+            Write-Warning "Attempt $attempt/$maxAttempts failed: $($_.Exception.Message)"
+            if ($attempt -lt $maxAttempts) {
+                Start-Sleep -Seconds 1
+                $attempt++
+                Write-Host "Retrying: attempt $attempt/$maxAttempts"
+            }
+            else {
+                throw "tailscale up failed after $maxAttempts attempts."
+            }
+        }
+        finally {
+            Write-Verbose "Cleaning up MSI installer"
+            if (Test-Path $InstallerPath) {
+                Remove-Item $InstallerPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
 }
 
 function Uninstall-Tailscale {
     $tailscaleExe = Join-Path $script:Config.InstallDir 'tailscale.exe'
 
     if (Test-Path $tailscaleExe) {
-        Write-Host "Bringing Tailscale down'..."
-        try { & $tailscaleExe down | Out-Null }
+        Write-Host "Bringing Tailscale down..."
+        try { & $tailscaleExe down 2>&1 | Out-Null }
         catch { Write-Warning "Failed to run 'tailscale down': $_" }
     }
     else {
